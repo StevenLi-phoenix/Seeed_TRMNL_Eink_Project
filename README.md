@@ -249,6 +249,30 @@ If you prefer to skip the build + upload steps below, flash directly from a web 
 
 3. Click on "PlatformIO: Upload" button.
 
+## **Flashing S3 boards via helper scripts (OG DIY Kit / reTerminal E1001)**
+
+The `scripts/` helpers default to ESP32-C3 (original TRMNL). For the ESP32-S3 based boards
+(`TRMNL_7inch5_OG_DIY_Kit`, `seeed_reTerminal_E1001`, `seeed_xiao_esp32s3`) set the `CHIP` env var:
+
+```bash
+# 1. Build for your S3 board
+pio run -e TRMNL_7inch5_OG_DIY_Kit
+
+# 2a. App-only flash — keeps WiFi credentials / NVS (recommended for in-place updates)
+CHIP=esp32s3 ./scripts/flash_app.sh .pio/build/TRMNL_7inch5_OG_DIY_Kit/firmware.bin
+
+# 2b. Or build a full merged image and flash it at 0x0 (fresh device)
+CHIP=esp32s3 ./scripts/merge_firmware.sh .pio/build/TRMNL_7inch5_OG_DIY_Kit trmnl-s3.bin
+CHIP=esp32s3 ./scripts/flash_merged.sh trmnl-s3.bin
+```
+
+`merge_firmware.sh` auto-selects flash params per chip (S3 → `dio` / `80m` / `8MB`) and includes
+`builds/bin/boot_app0.bin` at `0xe000` when present. Put the board in download mode first:
+power off, hold the BOOT button, power on, then release BOOT.
+
+> ⚠️ The prebuilt `builds/FW*.bin` are **ESP32-C3** images only — do **not** flash them to an
+> ESP32-S3 board (OG DIY Kit / reTerminal E1001). Build the S3 firmware from source instead.
+
 ## **Uploading guide (ESP32 Flash Download Tool)**
 
 Tools required:

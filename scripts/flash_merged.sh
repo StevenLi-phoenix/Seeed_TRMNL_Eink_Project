@@ -12,9 +12,10 @@ if [ $# -eq 0 ]; then
 fi
 
 FIRMWARE_FILE="$1"
+CHIP="${CHIP:-esp32c3}"   # override for S3 boards, e.g. CHIP=esp32s3 ./scripts/flash_merged.sh ...
 BAUD_RATE=$((115200 * 4))
 ESPTOOL="pio pkg exec -p tool-esptoolpy esptool.py -- "
-ESPTOOL_CMD="$ESPTOOL --chip esp32c3 --baud $BAUD_RATE"
+ESPTOOL_CMD="$ESPTOOL --chip $CHIP --baud $BAUD_RATE"
 
 if [ ! -f "$FIRMWARE_FILE" ]; then
     echo "Error: Firmware file not found: $FIRMWARE_FILE"
