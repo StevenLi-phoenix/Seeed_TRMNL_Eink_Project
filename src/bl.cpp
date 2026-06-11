@@ -667,7 +667,7 @@ static https_request_err_e downloadAndShow()
           // start connection and send HTTP header
           int httpCode = https.GET();
           int content_size = https.getSize();
-          uint8_t *buffer_old = nullptr; // Disable partial update for now
+          uint8_t *buffer_old = nullptr; // previous frame, restored into the EPD "old" plane for partial refresh
           int file_size_old = 0;
 
           // httpCode will be negative on error
@@ -736,11 +736,25 @@ static https_request_err_e downloadAndShow()
             filesystem_file_delete("/last.png");
             filesystem_file_rename("/current.png", "/last.png");
             filesystem_file_rename("/current.bmp", "/last.bmp");
-// Disable partial update (for now)
-//            if (filesystem_file_exists("/last.png")) {
-//                buffer_old = display_read_file("/last.png", &file_size_old);
-//                Log.info("%s [%d]: Reading last.png to use for partial update, size = %d\r\n", __FILE__, __LINE__, file_size_old);
-//            }
+            // Read the previous frame back so the EPD's "old" plane (cleared by
+            // the panel deep-sleep command) can be restored, making a partial
+            // refresh diff reliable. BMP only - that is what our server sends.
+            if (filesystem_file_exists("/last.bmp"))
+            {
+              buffer_old = display_read_file("/last.bmp", &file_size_old);
+              if (buffer_old != nullptr)
+              {
+                Log_info("Read /last.bmp as old frame for partial refresh, size = %d", file_size_old);
+              }
+              else
+              {
+                Log_info("Failed to read /last.bmp; partial refresh will degrade to fast");
+              }
+            }
+            else if (filesystem_file_exists("/last.png"))
+            {
+              Log_info("Old frame is PNG; partial refresh restore supports BMP only");
+            }
           }
 
           bool image_reverse = false;
@@ -748,7 +762,7 @@ static https_request_err_e downloadAndShow()
           {
             writeImageToFile("/current.png", buffer, content_size);
             Log.info("%s [%d]: Decoding png\r\n", __FILE__, __LINE__);
-            display_show_image(buffer, content_size, true);
+            display_show_image(buffer, content_size, true, buffer_old, file_size_old);
 //            delay(100);
 //            free(buffer);
 //            buffer = nullptr;
@@ -823,7 +837,7 @@ static https_request_err_e downloadAndShow()
               writeImageToFile("/current.bmp", buffer, content_size);
             }
             Log.info("Free heap at before display - %d", ESP.getMaxAllocHeap());
-            display_show_image(buffer, content_size, true);
+            display_show_image(buffer, content_size, true, buffer_old, file_size_old);
 
             // Using filename from API response
             new_filename = apiDisplayResult.response.filename;
@@ -863,6 +877,12 @@ static https_request_err_e downloadAndShow()
           break;
           default:
             break;
+          }
+
+          if (buffer_old != nullptr)
+          {
+            free(buffer_old); // old frame was already sent to the EPD (or skipped)
+            buffer_old = nullptr;
           }
 
           if (isPNG && png_res != PNG_NO_ERR)
@@ -1363,11 +1383,8 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             Log.info("%s [%d]: send_to_me PNG\r\n", __FILE__, __LINE__);
             image_err_e png_parse_result = PNG_NO_ERR; // DEBUG
             buffer = display_read_file("/current.png", &file_size);
-// Disable partial update for now
-//            if (filesystem_file_exists("/last.png")) {
-//                buffer_old = display_read_file("/last.png", &file_size_old);
-//                Log.info("%s [%d]: loading last PNG for partial update\r\n", __FILE__, __LINE__);
-//            }
+            // No old frame is passed here, so display_show_image() will degrade
+            // a partial refresh to a fast refresh automatically.
             if (png_parse_result != PNG_NO_ERR)
             {
               Log_error_submit("Error parsing PNG header, code: %d", png_parse_result);

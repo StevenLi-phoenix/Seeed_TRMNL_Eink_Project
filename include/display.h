@@ -77,11 +77,16 @@ void Paint_DrawMultilineText(UWORD x_start, UWORD y_start, const char *message,
 /**
  * @brief Function to show the image on the display
  * @param image_buffer pointer to the uint8_t image buffer
- * @param reverse shows if the color scheme is reverse
+ * @param data_size size of the image buffer in bytes
+ * @param bWait true to wait for the refresh to complete
+ * @param old_image_buffer optional previous frame (1-bpp BMP file image) used to
+ *        restore the EPD controller's "old" plane so REFRESH_PARTIAL works after
+ *        the panel RAM was cleared by deep sleep; pass nullptr if unavailable
+ * @param old_data_size size of old_image_buffer in bytes
  * @return none
  */
 
-void display_show_image(uint8_t *image_buffer, int data_size, bool bWait);
+void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_t *old_image_buffer = nullptr, int old_data_size = 0);
 
 /**
  * @brief Function to read an image from the file system

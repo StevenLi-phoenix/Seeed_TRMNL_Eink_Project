@@ -562,13 +562,47 @@ PNG *png = new PNG();
     free(png); // free the decoder instance
     return rc;
 } /* png_to_epd() */
-/** 
+/**
+ * @brief Restore the previous frame into the EPD controller's "old" plane
+ *        (DTM1 on UC81xx). The firmware sends the panel into deep sleep (DSLP)
+ *        at the end of every wake cycle, which clears the controller RAM, so
+ *        without this step a REFRESH_PARTIAL diff has no reliable reference
+ *        frame. Only 1-bpp BMP old frames (the format our server sends) are
+ *        supported; anything else is rejected so the caller can degrade safely.
+ * @param old_image_buffer pointer to the previous frame as a raw BMP file image
+ * @param old_data_size size of the buffer in bytes
+ * @return true if the old frame was written to the EPD's old plane
+ */
+static bool display_load_old_frame(uint8_t *old_image_buffer, int old_data_size)
+{
+    const int header_size = 62; // 1-bpp BMP header size used by TRMNL images
+    int expected_size = header_size + (((int)bbep.width() + 7) / 8) * (int)bbep.height();
+    if (old_image_buffer == nullptr) {
+        return false;
+    }
+    if (old_data_size < expected_size) {
+        Log_info("%s [%d]: Old frame too small (%d < %d bytes); skipping restore\r\n", __FILE__, __LINE__, old_data_size, expected_size);
+        return false;
+    }
+    if (old_image_buffer[0] != 'B' || old_image_buffer[1] != 'M') {
+        Log_info("%s [%d]: Old frame is not a BMP; skipping restore\r\n", __FILE__, __LINE__);
+        return false;
+    }
+    flip_image(old_image_buffer + header_size, bbep.width(), bbep.height(), false); // fix bottom-up bitmap, same as the live image path
+    bbep.setBuffer(old_image_buffer + header_size);
+    bbep.writePlane(PLANE_0_TO_1); // send the old frame to the EPD "old" plane (UC81xx DTM1)
+    bbep.setBuffer(NULL); // the caller owns (and will free) the old buffer; drop the reference
+    Log_info("%s [%d]: Old frame restored to EPD old plane for partial refresh\r\n", __FILE__, __LINE__);
+    return true;
+} /* display_load_old_frame() */
+
+/**
  * @brief Function to show the image on the display
  * @param image_buffer pointer to the uint8_t image buffer
  * @param reverse shows if the color scheme is reverse
  * @return none
  */
-void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
+void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_t *old_image_buffer, int old_data_size)
 
 {
     bool isPNG = data_size >= 4 && MOTOLONG(image_buffer) == (int32_t)0x89504e47;;
@@ -581,6 +615,10 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
    // Log_info("Paint_NewImage %d", reverse);
     Log_info("show image for array");
     Log_info("maximum_compatibility = %d\n", apiDisplayResult.response.maximum_compatibility);
+    // Restore the previous frame into the EPD's "old" plane before writing the
+    // new frame, so a partial refresh can diff against it (the controller RAM
+    // is empty after deep sleep). Must happen before the new frame is written.
+    bool bOldFrameLoaded = display_load_old_frame(old_image_buffer, old_data_size);
 #ifdef FUTURE
     if (reverse)
     {
@@ -630,7 +668,10 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
         }
         bbep.writePlane(PLANE_0); // send image data to the EPD
         iRefreshMode = REFRESH_PARTIAL;
-        iUpdateCount = 1; // use partial update
+        // NB: do NOT reset iUpdateCount here — it is RTC_DATA_ATTR and must
+        // accumulate across deep-sleep wakes so the "force a full refresh
+        // every 8 updates" anti-ghosting check below can actually fire.
+        // (Resetting it to 1 on every BMP made that check unreachable.)
     }
     Log_info("Display refresh start");
 #ifdef BB_EPAPER
@@ -642,6 +683,12 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     if (refresh_seconds >= 30*60 && iRefreshMode == REFRESH_PARTIAL) {
         // For users who set updates 30 minutes or longer, use the "fast" update to prevent ghosting
         Log_info("%s [%d]: Forcing fast refresh (not partial) since the TRMNL refresh_rate is set to > 30 min\n", __FILE__, __LINE__);
+        iRefreshMode = REFRESH_FAST;
+    }
+    if (iRefreshMode == REFRESH_PARTIAL && !bOldFrameLoaded) {
+        // Without the previous frame in the EPD's old plane (cleared by deep
+        // sleep) a partial diff is unreliable; degrade to FAST, not FULL.
+        Log_info("%s [%d]: Old frame not loaded; degrading PARTIAL to FAST refresh\r\n", __FILE__, __LINE__);
         iRefreshMode = REFRESH_FAST;
     }
     if (!bWait) iRefreshMode = REFRESH_PARTIAL; // fast update when showing loading screen
