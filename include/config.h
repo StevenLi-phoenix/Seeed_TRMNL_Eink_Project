@@ -3,7 +3,10 @@
 
 #define FW_MAJOR_VERSION 1
 #define FW_MINOR_VERSION 6
-#define FW_PATCH_VERSION 7
+// 1.6.8 (fork): display.lishuyu.app base URL + real partial refresh
+// (old-frame restore from SPIFFS) + iUpdateCount anti-ghosting fix.
+// Bumped so device telemetry (FW-Version header) proves the reflash landed.
+#define FW_PATCH_VERSION 8
 
 // Helper macros for stringification
 #define STRINGIFY(x) #x
@@ -104,6 +107,6 @@ enum WIFI_CONNECT_RETRY_TIME // Time to sleep before trying to connect to the Wi
 
 #define SERVER_MAX_RETRIES 3
 
-#define API_BASE_URL "https://status.lishuyu.app"
+#define API_BASE_URL "https://display.lishuyu.app"
 
 #endif
