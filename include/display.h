@@ -21,6 +21,7 @@ enum MSG
   MSG_TOO_BIG,
   MAC_NOT_REGISTERED,
   TEST,
+  WIFI_RECOVERY,
 };
 
 /**
@@ -123,6 +124,18 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
  * @return none
  */
 void display_show_msg_api(uint8_t *image_buffer, String message);
+
+/**
+ * @brief WiFi recovery-mode screen: hotspot instructions, battery gauge and
+ *        estimated remaining runtime. Drawn at most once per battery step
+ *        (caller skips redraws) so the e-ink keeps it across deep sleeps.
+ * @param image_buffer pointer to the logo image buffer
+ * @param battery_pct battery state of charge, 0..100
+ * @param voltage battery voltage in Volts
+ * @param eta_days estimated days the battery survives recovery duty cycle
+ * @return none
+ */
+void display_show_recovery(uint8_t *image_buffer, int battery_pct, float voltage, float eta_days);
 
 /**
  * @brief Function to got the display to the sleep

@@ -3,10 +3,12 @@
 
 #define FW_MAJOR_VERSION 1
 #define FW_MINOR_VERSION 6
-// 1.6.8 (fork): display.lishuyu.app base URL + real partial refresh
-// (old-frame restore from SPIFFS) + iUpdateCount anti-ghosting fix.
-// Bumped so device telemetry (FW-Version header) proves the reflash landed.
-#define FW_PATCH_VERSION 8
+// 1.6.9 (fork): WiFi recovery mode — after the fast-retry backoff is
+// exhausted, every wake opens a 5-min limited captive portal so new WiFi
+// credentials can be submitted from a phone without wiping anything;
+// recovery screen shows battery %/ETA; every BMP refresh gets a timestamp.
+// (1.6.8: display.lishuyu.app base URL + real partial refresh.)
+#define FW_PATCH_VERSION 9
 
 // Helper macros for stringification
 #define STRINGIFY(x) #x
@@ -62,6 +64,23 @@ enum WIFI_CONNECT_RETRY_TIME // Time to sleep before trying to connect to the Wi
     WIFI_SECOND_RETRY = 180,
     WIFI_THIRD_RETRY = 300
 };
+
+// --- WiFi recovery mode (fork feature) ---
+// Once the 60/180/300s fast retries are exhausted (retry count reaches the
+// threshold), every wake opens the captive portal as a time-limited recovery
+// hotspot instead of silently sleeping forever. Saved credentials are kept.
+#define WIFI_RECOVERY_PORTAL_TIMEOUT_MS 300000UL // hotspot stays open 5 min per wake
+#define WIFI_RECOVERY_PORTAL_RETRY_THRESHOLD 4   // matches wifiErrorDeepSleep()'s default branch
+#define WIFI_RECOVERY_REDRAW_PCT_DELTA 5         // redraw recovery screen only when battery % moved this much
+#define PREFERENCES_RECOVERY_DRAWN_PCT "rec_pct" // battery % shown on the last drawn recovery screen
+// Estimated days a full battery survives the recovery duty cycle
+// (per ~20 min: 5 min AP @ ~100 mA + connect retries + 15 min deep sleep
+// → ~26 mA average → 1800 mAh / 26 mA ≈ 69 h). Rough figure for the screen.
+#define BATTERY_RECOVERY_FULL_DAYS 3.0f
+
+// Local timezone for on-screen timestamps (epoch/telemetry stays UTC)
+#define TIME_GMT_OFFSET_SEC (8 * 3600) // UTC+8
+#define TIME_DST_OFFSET_SEC 0
 
 #if defined(BOARD_TRMNL)
 #define PIN_INTERRUPT 2

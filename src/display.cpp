@@ -24,6 +24,7 @@ FASTEPD bbep;
 #include "wifi_connect_qr.h"
 #include "wifi_failed_qr.h"
 #include <ctype.h> //iscntrl()
+#include <time.h>  // strftime for the refresh timestamp overlay
 #include <api-client/display.h>
 #include <trmnl_log.h>
 #include "png_flip.h"
@@ -602,6 +603,39 @@ static bool display_load_old_frame(uint8_t *old_image_buffer, int old_data_size)
  * @param reverse shows if the color scheme is reverse
  * @return none
  */
+/**
+ * @brief Draw a small "MM-DD HH:MM" timestamp in the bottom-right corner of
+ *        the current framebuffer so the user can tell how fresh the screen
+ *        content is (stale content = WiFi/server trouble). Silently does
+ *        nothing while the RTC has never been NTP-synced (fresh cold boot).
+ *        Must be called after the frame content is in the framebuffer and
+ *        before writePlane().
+ */
+static void display_overlay_timestamp(void)
+{
+    struct tm timeinfo;
+    char szTime[20];
+    BB_RECT rect;
+
+    // Short timeout: RTC keeps time across deep sleep, so this returns
+    // instantly once the clock was ever synced; don't stall the cold boot.
+    if (!getLocalTime(&timeinfo, 50) || timeinfo.tm_year < (2025 - 1900))
+    {
+        Log_info("Timestamp overlay skipped: clock not synced yet");
+        return;
+    }
+    strftime(szTime, sizeof(szTime), "%m-%d %H:%M", &timeinfo);
+
+    bbep.setFont(nicoclean_8);
+    bbep.getStringBox(szTime, &rect);
+    int x = bbep.width() - rect.w - 12;
+    // White backing box so the stamp stays legible on top of any image
+    bbep.fillRect(x - 6, bbep.height() - rect.h - 12, rect.w + 18, rect.h + 12, BBEP_WHITE);
+    bbep.setTextColor(BBEP_BLACK, BBEP_WHITE);
+    bbep.setCursor(x, bbep.height() - 8);
+    bbep.print(szTime);
+}
+
 void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_t *old_image_buffer, int old_data_size)
 
 {
@@ -638,10 +672,13 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_
     if (isPNG == true && data_size < MAX_IMAGE_SIZE)
     {
         Log_info("Drawing PNG");
+        // PNG decode streams straight into the EPD plane (no framebuffer),
+        // so the refresh timestamp overlay is not possible on this path.
         iRefreshMode = png_to_epd(image_buffer, data_size);
     }
     else // uncompressed BMP or Group5 compressed image
     {
+        bool bIsRawBmp = false;
         if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER)
         {
             // G5 compressed image
@@ -654,19 +691,31 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_
             int y = (height - pBBB->height)/2; // center it
             if (x > 0 || y > 0) // only clear if the image is smaller than the display
             {
-                bbep.fillScreen(BBEP_WHITE); 
-            }     
+                bbep.fillScreen(BBEP_WHITE);
+            }
             bbep.loadG5Image(image_buffer, x, y, BBEP_WHITE, BBEP_BLACK);
-        } 
-        else 
+        }
+        else
         {
+            bIsRawBmp = true;
          // This work-around is due to a lack of RAM; the correct method would be to use loadBMP()
             flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
 #ifdef BB_EPAPER
             bbep.setBuffer(image_buffer+62); // uncompressed 1-bpp bitmap
 #endif
         }
+        display_overlay_timestamp();
         bbep.writePlane(PLANE_0); // send image data to the EPD
+        if (bIsRawBmp)
+        {
+            // Flip the caller's buffer back to raw bottom-up orientation with
+            // the timestamp embedded, so the frame saved to /current.bmp (and
+            // later restored as /last.bmp into the EPD old plane) matches what
+            // the panel actually shows — otherwise partial refreshes would
+            // leave a ghost of the previous timestamp. Requires the caller to
+            // save the file AFTER this function returns.
+            flip_image(image_buffer+62, bbep.width(), bbep.height(), false);
+        }
         iRefreshMode = REFRESH_PARTIAL;
         // NB: do NOT reset iUpdateCount here — it is RTC_DATA_ATTR and must
         // accumulate across deep-sleep wakes so the "force a full refresh
@@ -926,6 +975,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
     default:
         break;
     }
+    display_overlay_timestamp();
 #ifdef BB_EPAPER
     bbep.writePlane(PLANE_0);
     bbep.refresh(REFRESH_FULL, true);
@@ -1052,6 +1102,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
         break;
     }
     Log_info("Start drawing...");
+    display_overlay_timestamp();
 #ifdef BB_EPAPER
     bbep.writePlane(PLANE_0);
     bbep.refresh(REFRESH_FULL, true);
@@ -1060,6 +1111,93 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     bbep.fullUpdate();
 #endif
     Log_info("display");
+}
+
+/**
+ * @brief WiFi recovery-mode screen: hotspot instructions, battery gauge and
+ *        estimated remaining runtime, plus the standard refresh timestamp.
+ *        See display.h for the contract; bl.cpp throttles redraws.
+ */
+void display_show_recovery(uint8_t *image_buffer, int battery_pct, float voltage, float eta_days)
+{
+    BB_RECT rect;
+    auto width = display_width();
+    auto height = display_height();
+    UWORD Imagesize = ((width % 8 == 0) ? (width / 8) : (width / 8 + 1)) * height;
+
+    if (battery_pct < 0) battery_pct = 0;
+    if (battery_pct > 100) battery_pct = 100;
+    // integer split for the log line: hybrid arduino/espidf printf may lack %f
+    Log_info("Recovery screen: battery %d%% (%dmV), ETA ~%d.%d days",
+             battery_pct, (int)(voltage * 1000.0f), (int)eta_days, ((int)(eta_days * 10.0f)) % 10);
+#ifdef BB_EPAPER
+    bbep.allocBuffer(false);
+#endif
+    // centered logo, same handling as display_show_msg()
+    if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER)
+    {
+        BB_BITMAP *pBBB = (BB_BITMAP *)image_buffer;
+        int x = (width - pBBB->width) / 2;
+        int y = (height - pBBB->height) / 2;
+        if (x > 0 || y > 0)
+        {
+            bbep.fillScreen(BBEP_WHITE);
+        }
+        bbep.loadG5Image(image_buffer, x, y, BBEP_WHITE, BBEP_BLACK);
+    }
+    else
+    {
+#ifdef BB_EPAPER
+        memcpy(bbep.getBuffer(), image_buffer + 62, Imagesize);
+#endif
+    }
+
+    bbep.setFont(nicoclean_8);
+    bbep.setTextColor(BBEP_BLACK, BBEP_WHITE);
+
+    // battery gauge, top-left corner
+    bbep.drawRect(40, 40, 44, 20, BBEP_BLACK); // body
+    bbep.fillRect(84, 46, 4, 8, BBEP_BLACK);   // positive terminal nub
+    int fill_w = (38 * battery_pct) / 100;     // inner fill, 0..38 px
+    if (fill_w > 0)
+    {
+        bbep.fillRect(43, 43, fill_w, 14, BBEP_BLACK);
+    }
+    String battStr = String(battery_pct) + "% (" + String(voltage, 2) + "V)";
+    bbep.setCursor(96, 56);
+    bbep.print(battStr);
+
+    // help QR code, top-right corner (same art as the first-setup screen)
+    bbep.loadG5Image(wifi_connect_qr, bbep.width() - 40 - 66, 40, BBEP_WHITE, BBEP_BLACK);
+
+    // instructions, centered near the bottom (same pattern as WIFI_CONNECT)
+    const char line1[] = "WiFi unreachable - recovery hotspot is ON";
+    bbep.getStringBox(line1, &rect);
+    bbep.setCursor((bbep.width() - rect.w) / 2, 370);
+    bbep.println(line1);
+    const char line2[] = "Join 'TRMNL' WiFi on your phone to submit a new network";
+    bbep.getStringBox(line2, &rect);
+    bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+    bbep.println(line2);
+    const char line3[] = "Open for 5 minutes, reopens every 15 minutes until fixed";
+    bbep.getStringBox(line3, &rect);
+    bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+    bbep.println(line3);
+    String line4 = "Estimated battery left in this mode: ~" + String(eta_days, 1) + " days";
+    bbep.getStringBox(line4, &rect);
+    bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+    bbep.print(line4);
+
+    display_overlay_timestamp();
+
+#ifdef BB_EPAPER
+    bbep.writePlane(PLANE_0);
+    bbep.refresh(REFRESH_FULL, true);
+    bbep.freeBuffer();
+#else
+    bbep.fullUpdate();
+#endif
+    Log_info("recovery screen displayed");
 }
 
 /**

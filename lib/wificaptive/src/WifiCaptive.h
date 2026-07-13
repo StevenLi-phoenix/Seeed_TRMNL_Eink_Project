@@ -60,8 +60,11 @@ public:
     wl_status_t connect(const WifiCredentials credentials);
 
     /// @brief Starts WiFi configuration portal.
+    /// @param timeoutMs 0 = wait forever (original first-setup behavior);
+    ///        >0 = give up and tear the AP down if no SSID was submitted
+    ///        within this many milliseconds (used by the WiFi recovery mode).
     /// @return True if successfully connected to provided SSID, false otherwise.
-    bool startPortal();
+    bool startPortal(uint32_t timeoutMs = 0);
 
     /// @brief Checks if any ssid is saved
     /// @return True if any ssis is saved, false otherwise

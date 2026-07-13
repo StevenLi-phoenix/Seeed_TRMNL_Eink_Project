@@ -38,6 +38,7 @@
 #include "logo_small.h"
 #include "loading.h"
 #include <wifi-helpers.h>
+#include <battery_estimate.h>
 
 bool pref_clear = false;
 String new_filename = "";
@@ -83,6 +84,7 @@ static void writeImageToFile(const char *name, uint8_t *in_buffer, size_t size);
 static void showMessageWithLogo(MSG message_type);
 static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message);
 static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse);
+static void showRecoveryScreen(int battery_pct, float eta_days); // WiFi recovery-mode screen
 static void wifiErrorDeepSleep();
 static uint8_t *storedLogoOrDefault(int iType);
 static bool saveCurrentFileName(String &name);
@@ -286,19 +288,61 @@ void bl_init(void)
       String ip = String(WiFi.localIP());
       Log.info("%s [%d]:wifi_connection [DEBUG]: Connected: %s\r\n", __FILE__, __LINE__, ip.c_str());
       preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+      // ensure the next recovery episode redraws its screen from scratch
+      preferences.remove(PREFERENCES_RECOVERY_DRAWN_PCT);
     }
     else
     {
-      if (current_msg != WIFI_FAILED)
-      {
-        showMessageWithLogo(WIFI_FAILED);
-        current_msg = WIFI_FAILED;
-      }
-
       Log_fatal_submit("Connection failed! WL Status: %d", WiFi.status());
 
-      // Go to deep sleep
-      wifiErrorDeepSleep();
+      uint8_t retry_count = preferences.getInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+
+      if (retry_count >= WIFI_RECOVERY_PORTAL_RETRY_THRESHOLD)
+      {
+        // Recovery mode: every saved network kept failing through the
+        // 60/180/300s fast retries. Open a time-limited hotspot each wake so
+        // new credentials can be submitted from a phone — nothing is wiped.
+        int battery_pct = battery_percent(vBatt);
+        float eta_days = battery_recovery_eta_days(battery_pct, BATTERY_RECOVERY_FULL_DAYS);
+
+        int last_drawn_pct = preferences.getInt(PREFERENCES_RECOVERY_DRAWN_PCT, -100);
+        if (abs(battery_pct - last_drawn_pct) >= WIFI_RECOVERY_REDRAW_PCT_DELTA)
+        {
+          // e-ink keeps the image through deep sleep; skip the full-refresh
+          // flash unless the battery gauge actually moved
+          showRecoveryScreen(battery_pct, eta_days);
+          current_msg = WIFI_RECOVERY;
+          preferences.putInt(PREFERENCES_RECOVERY_DRAWN_PCT, battery_pct);
+        }
+
+        Log_info("Opening recovery portal for %lu ms (wifi retry %d, battery %d%%)",
+                 (unsigned long)WIFI_RECOVERY_PORTAL_TIMEOUT_MS, retry_count, battery_pct);
+        WifiCaptivePortal.setResetSettingsCallback(resetDeviceCredentials);
+        if (WifiCaptivePortal.startPortal(WIFI_RECOVERY_PORTAL_TIMEOUT_MS))
+        {
+          Log_info("Recovery portal: new credentials accepted, back online");
+          preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+          preferences.remove(PREFERENCES_RECOVERY_DRAWN_PCT);
+          // fall through to the normal flow: clock sync, /api/display fetch
+        }
+        else
+        {
+          Log_info("Recovery portal timed out with no new credentials");
+          // keep the existing backoff cycle (900s per wake at this point)
+          wifiErrorDeepSleep();
+        }
+      }
+      else
+      {
+        if (current_msg != WIFI_FAILED)
+        {
+          showMessageWithLogo(WIFI_FAILED);
+          current_msg = WIFI_FAILED;
+        }
+
+        // Go to deep sleep
+        wifiErrorDeepSleep();
+      }
     }
   }
   else
@@ -832,12 +876,16 @@ static https_request_err_e downloadAndShow()
           {
           case BMP_NO_ERR:
           {
+            Log.info("Free heap at before display - %d", ESP.getMaxAllocHeap());
+            display_show_image(buffer, content_size, true, buffer_old, file_size_old);
+            // Save AFTER displaying: display_show_image() embeds the refresh
+            // timestamp into the buffer (returned in raw bottom-up orientation),
+            // and /current.bmp must match the panel content for the next
+            // partial-refresh old-frame restore to be artifact-free.
             if (!filesystem_file_exists("/current.png"))
             {
               writeImageToFile("/current.bmp", buffer, content_size);
             }
-            Log.info("Free heap at before display - %d", ESP.getMaxAllocHeap());
-            display_show_image(buffer, content_size, true, buffer_old, file_size_old);
 
             // Using filename from API response
             new_filename = apiDisplayResult.response.filename;
@@ -1854,7 +1902,9 @@ static bool setClock()
   bool sync_status = false;
   struct tm timeinfo;
 
-  configTime(0, 0, "time.google.com", "time.cloudflare.com");
+  // gmtOffset shifts getLocalTime() for the on-screen timestamps; epoch
+  // values (getTime, telemetry) remain UTC regardless
+  configTime(TIME_GMT_OFFSET_SEC, TIME_DST_OFFSET_SEC, "time.google.com", "time.cloudflare.com");
   Log.info("%s [%d]: Time synchronization...\r\n", __FILE__, __LINE__);
 
   // Wait for time to be set
@@ -2045,6 +2095,13 @@ static void writeSpecialFunction(SPECIAL_FUNCTION function)
 
 static void showMessageWithLogo(MSG message_type) {
   display_show_msg(storedLogoOrDefault(0), message_type);
+  need_to_refresh_display = 1;
+  preferences.putBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
+}
+
+static void showRecoveryScreen(int battery_pct, float eta_days)
+{
+  display_show_recovery(storedLogoOrDefault(0), battery_pct, vBatt, eta_days);
   need_to_refresh_display = 1;
   preferences.putBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
 }

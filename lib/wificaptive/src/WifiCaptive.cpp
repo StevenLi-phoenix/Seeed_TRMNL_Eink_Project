@@ -13,7 +13,7 @@ void WifiCaptive::setUpDNSServer(DNSServer &dnsServer, const IPAddress &localIP)
     dnsServer.start(53, "*", localIP);
 }
 
-bool WifiCaptive::startPortal()
+bool WifiCaptive::startPortal(uint32_t timeoutMs)
 {
     _dnsServer = new DNSServer();
     _server = new AsyncWebServer(80);
@@ -80,10 +80,18 @@ bool WifiCaptive::startPortal()
     readWifiCredentials();
 
     bool succesfullyConnected = false;
+    uint32_t startMs = millis();
     // wait until SSID is provided
     while (1)
     {
         _dnsServer->processNextRequest();
+
+        // millis() subtraction is rollover-safe
+        if (timeoutMs > 0 && (millis() - startMs) >= timeoutMs)
+        {
+            Log_info("Portal timed out after %lu ms with no credentials submitted", (unsigned long)timeoutMs);
+            break; // succesfullyConnected stays false; shared teardown below runs
+        }
 
         if (_ssid == "")
         {
@@ -118,8 +126,11 @@ bool WifiCaptive::startPortal()
     delay(1000);
 
     auto status = WiFi.status();
-    if (status != WL_CONNECTED)
+    if (status != WL_CONNECTED && _ssid != "")
     {
+        // Reconnect fallback for the case where tearing down the AP dropped
+        // the fresh STA connection. Skipped when no SSID was ever submitted
+        // (portal timeout) — retrying empty credentials is pointless.
         Log_info("Not connected after AP disconnect");
         WiFi.mode(WIFI_STA);
 
