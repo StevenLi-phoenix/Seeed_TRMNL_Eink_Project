@@ -81,6 +81,19 @@ void display_sleep(uint32_t u32Millis)
   esp_light_sleep_start();
 }
 
+// RTC memory: kept across deep sleep, zeroed (= invalid) by any reset or crash.
+static RTC_DATA_ATTR bool bSavedFrameValid = false;
+
+bool display_saved_frame_valid(void)
+{
+    return bSavedFrameValid;
+}
+
+void display_set_saved_frame_valid(bool valid)
+{
+    bSavedFrameValid = valid;
+}
+
 /**
  * @brief Function to reset the display
  * @param none
@@ -88,6 +101,7 @@ void display_sleep(uint32_t u32Millis)
  */
 void display_reset(void)
 {
+    bSavedFrameValid = false;
     Log_info("e-Paper Clear start");
     bbep.fillScreen(BBEP_WHITE);
 #ifdef BB_EPAPER
@@ -639,6 +653,7 @@ static void display_overlay_timestamp(void)
 void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_t *old_image_buffer, int old_data_size)
 
 {
+    bSavedFrameValid = false; // the caller re-validates after saving /current.bmp
     bool isPNG = data_size >= 4 && MOTOLONG(image_buffer) == (int32_t)0x89504e47;;
     auto width = display_width();
     auto height = display_height();
@@ -736,7 +751,8 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_
     }
     if (iRefreshMode == REFRESH_PARTIAL && !bOldFrameLoaded) {
         // Without the previous frame in the EPD's old plane (cleared by deep
-        // sleep) a partial diff is unreliable; degrade to FAST, not FULL.
+        // sleep, or stale after another screen) a partial diff is unreliable;
+        // degrade to FAST, not FULL (battery first; FULL looked no cleaner).
         Log_info("%s [%d]: Old frame not loaded; degrading PARTIAL to FAST refresh\r\n", __FILE__, __LINE__);
         iRefreshMode = REFRESH_FAST;
     }
@@ -788,6 +804,7 @@ uint8_t *buffer;
  */
 void display_show_msg(uint8_t *image_buffer, MSG message_type)
 {
+    bSavedFrameValid = false;
     auto width = display_width();
     auto height = display_height();
     UWORD Imagesize = ((width % 8 == 0) ? (width / 8) : (width / 8 + 1)) * height;
@@ -998,6 +1015,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
  */
 void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_id, bool id, const char *fw_version, String message)
 {
+    bSavedFrameValid = false;
     Log_info("Free heap in display_show_msg - %d", ESP.getMaxAllocHeap());
     Log_info("maximum_compatibility = %d\n", apiDisplayResult.response.maximum_compatibility);
 #ifdef BB_EPAPER
@@ -1120,6 +1138,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
  */
 void display_show_recovery(uint8_t *image_buffer, int battery_pct, float voltage, float eta_days)
 {
+    bSavedFrameValid = false;
     BB_RECT rect;
     auto width = display_width();
     auto height = display_height();

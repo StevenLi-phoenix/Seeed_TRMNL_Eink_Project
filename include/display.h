@@ -46,6 +46,15 @@ void display_show_battery(float f);
 void display_reset(void);
 
 /**
+ * @brief Whether the panel currently shows the frame saved in /current.bmp.
+ *        Only then is /last.bmp (the renamed /current.bmp) a valid old-plane
+ *        reference for a partial refresh. Cleared by every non-server screen
+ *        (loading logo, messages, recovery) and by any reset; survives deep sleep.
+ */
+bool display_saved_frame_valid(void);
+void display_set_saved_frame_valid(bool valid);
+
+/**
  * @brief Function to read the display height
  * @return uint16_t - height of display in pixels
  */

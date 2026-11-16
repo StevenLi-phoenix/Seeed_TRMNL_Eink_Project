@@ -799,7 +799,13 @@ static https_request_err_e downloadAndShow()
             // Read the previous frame back so the EPD's "old" plane (cleared by
             // the panel deep-sleep command) can be restored, making a partial
             // refresh diff reliable. BMP only - that is what our server sends.
-            if (filesystem_file_exists("/last.bmp"))
+            if (!display_saved_frame_valid())
+            {
+              // Something else (loading logo, a message, a reset) was drawn
+              // after /last.bmp was shown, so it no longer matches the panel.
+              Log_info("Panel no longer shows /last.bmp; skipping old-frame restore");
+            }
+            else if (filesystem_file_exists("/last.bmp"))
             {
               buffer_old = display_read_file("/last.bmp", &file_size_old);
               if (buffer_old != nullptr)
@@ -901,6 +907,7 @@ static https_request_err_e downloadAndShow()
             if (!filesystem_file_exists("/current.png"))
             {
               writeImageToFile("/current.bmp", buffer, content_size);
+              display_set_saved_frame_valid(true);
             }
 
             // Using filename from API response
