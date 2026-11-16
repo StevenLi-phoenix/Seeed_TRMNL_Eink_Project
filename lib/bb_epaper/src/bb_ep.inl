@@ -2110,6 +2110,15 @@ int bbepCreateVirtual(BBEPDISP *pBBEP, int iWidth, int iHeight, int iFlags)
 void bbepLightSleep(uint32_t u32Millis)
 {
 #ifdef ARDUINO_ARCH_ESP32
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+  // Light sleep powers down the USB-Serial/JTAG peripheral; with a host
+  // attached that drops the USB link mid-refresh. On USB power there is no
+  // battery to save, so just busy-wait instead.
+  if (HWCDC::isPlugged()) {
+    delay(u32Millis);
+    return;
+  }
+#endif
   esp_sleep_enable_timer_wakeup(u32Millis * 1000L);
   esp_light_sleep_start();
 #else
@@ -2121,6 +2130,9 @@ void bbepLightSleep(uint32_t u32Millis)
 // The polarity of the busy signal is reversed on the UC81xx compared
 // to the SSD16xx controllers
 //
+#ifndef BBEP_BUSY_TIMEOUT_MS
+#define BBEP_BUSY_TIMEOUT_MS 60000 // 7-color panels can take ~30s per refresh
+#endif
 void bbepWaitBusy(BBEPDISP *pBBEP)
 {
     int iTimeout = 0;
@@ -2130,11 +2142,20 @@ void bbepWaitBusy(BBEPDISP *pBBEP)
     delay(10); // give time for the busy status to be valid
     uint8_t busy_idle =  (pBBEP->chip_type == BBEP_CHIP_UC81xx) ? HIGH : LOW;
     delay(1); // some panels need a short delay before testing the BUSY line
-    while (iTimeout < 5000) {
+    // iTimeout was never advanced, so a panel whose BUSY line never reached
+    // idle (loose FPC, dead panel) hung the device forever. Bound the wait.
+    while (iTimeout < BBEP_BUSY_TIMEOUT_MS) {
         if (digitalRead(pBBEP->iBUSYPin) == busy_idle) break;
         // delay(1);
         bbepLightSleep(200); // save battery power by checking every 200ms
+        iTimeout += 200;
     }
+#ifdef ARDUINO
+    if (iTimeout >= BBEP_BUSY_TIMEOUT_MS) {
+        Serial.printf("[bb_epaper] BUSY pin %d stuck at %d (idle=%d) for %d ms, giving up\r\n",
+                      pBBEP->iBUSYPin, digitalRead(pBBEP->iBUSYPin), busy_idle, iTimeout);
+    }
+#endif
 } /* bbepWaitBusy() */
 //
 // Return if panel is busy
