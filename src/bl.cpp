@@ -67,7 +67,7 @@ PreferencesPersistence preferencesPersistence(preferences);
 StoredLogs storedLogs(LOG_MAX_NOTES_NUMBER / 2, LOG_MAX_NOTES_NUMBER / 2, PREFERENCES_LOG_KEY, PREFERENCES_LOG_BUFFER_HEAD_KEY, preferencesPersistence);
 
 static https_request_err_e downloadAndShow(); // download and show the image
-static uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer);
+static uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer, int buffer_size = 0);
 static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse);
 static void getDeviceCredentials();                  // receiveing API key and Friendly ID
 static bool performApiSetup();     // perform API setup call and return success
@@ -706,6 +706,9 @@ static https_request_err_e downloadAndShow()
 
           const char *headers[] = {"Content-Type"};
           https.collectHeaders(headers, 1);
+          // HTTP/1.0 rules out chunked transfer encoding: the body is read raw
+          // through getStreamPtr(), which does not strip chunk framing.
+          https.useHTTP10(true);
           Log_info("GET...");
           Log_info("RSSI: %d", WiFi.RSSI());
           // start connection and send HTTP header
@@ -751,9 +754,22 @@ static https_request_err_e downloadAndShow()
 
           Log.info("%s [%d]: Starting a download at: %d\r\n", __FILE__, __LINE__, getTime());
           heap_caps_check_integrity_all(true);
-          buffer = (uint8_t *)malloc(content_size);
+          // No Content-Length (getSize() == -1): read until the server closes
+          // the connection, into a buffer sized for the largest image we accept.
+          bool bUnknownSize = content_size <= 0;
+          int buffer_size = bUnknownSize ? MAX_IMAGE_SIZE : content_size;
+          buffer = (uint8_t *)malloc(buffer_size);
+          if (buffer == nullptr)
+          {
+            Log_error_submit("Image buffer allocation failed (%d bytes)", buffer_size);
+            return HTTPS_REQUEST_FAILED;
+          }
 
-          counter = downloadStream(stream, content_size, buffer);
+          counter = downloadStream(stream, content_size, buffer, buffer_size);
+          if (bUnknownSize)
+          {
+            content_size = counter;
+          }
 
           if (counter >= 2 && buffer[0] == 'B' && buffer[1] == 'M')
           {
@@ -960,21 +976,39 @@ static https_request_err_e downloadAndShow()
   return result;
 }
 
-uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer)
+/**
+ * @brief Read an HTTP body into buffer.
+ * @param content_size expected body length; <= 0 means unknown (no
+ *        Content-Length), in which case reading stops when the server closes
+ *        the connection or buffer_size bytes have been read
+ * @param buffer_size capacity of buffer; only used when content_size <= 0
+ */
+uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer, int buffer_size)
 {
   int iteration_counter = 0;
-  int counter2 = content_size;
+  bool bUnknownSize = content_size <= 0;
+  int target = bUnknownSize ? buffer_size : content_size;
   unsigned long download_start = millis();
   int counter = 0;
-  while (counter != content_size && millis() - download_start < 10000)
+  while (counter < target && millis() - download_start < 10000)
   {
-    if (stream->available())
+    int available = stream->available();
+    if (available > 0)
     {
-      Log.info("%s [%d]: Downloading... Available bytes: %d\r\n", __FILE__, __LINE__, stream->available());
-      counter += stream->readBytes(buffer + counter, counter2 -= counter);
+      Log.info("%s [%d]: Downloading... Available bytes: %d\r\n", __FILE__, __LINE__, available);
+      int remaining = target - counter;
+      counter += stream->readBytes(buffer + counter, available < remaining ? available : remaining);
       iteration_counter++;
     }
+    else if (bUnknownSize && !stream->connected())
+    {
+      break; // server closed the connection: body complete
+    }
     delay(10);
+  }
+  if (bUnknownSize && counter >= target && stream->available() > 0)
+  {
+    Log_error("Image larger than %d bytes; truncated", buffer_size);
   }
 
   Log_info("Download end: %d/%d bytes in %d ms (%d iterations)", counter, content_size, millis() - download_start, iteration_counter);
