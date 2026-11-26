@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11" # ESP-IDF 4.4 pyparsing imports sre_constants (removed in newer Python)
 
       - name: Install PlatformIO Core
         run: pip install --upgrade platformio
