@@ -55,8 +55,10 @@ void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP, WifiOperat
 
     server.on("/soft-reset", HTTP_ANY, [callbacks](AsyncWebServerRequest *request)
               {
-		callbacks.resetSettings();
-		request->send(200); });
+		if (callbacks.resetSettings())
+			request->send(200);
+		else
+			request->send(403); });
 
     server.on("/advanced", HTTP_GET, [&](AsyncWebServerRequest *request)
               {

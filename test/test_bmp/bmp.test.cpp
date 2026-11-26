@@ -39,7 +39,7 @@ void test_parseBMPHeader_BMP_NO_ERR(void)
   auto bmp_data = readBMPFile("./test.bmp");
   bool image_reverse = false;
 
-  bmp_err_e result = parseBMPHeader(bmp_data.data(), image_reverse);
+  bmp_err_e result = parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse);
 
   TEST_ASSERT_EQUAL(BMP_NO_ERR, result);
   TEST_ASSERT_EQUAL(false, image_reverse);
@@ -59,7 +59,7 @@ void test_parseBMPHeader_BMP_NO_ERR_reversed(void)
   bmp_data[60] = 0;
   bmp_data[61] = 0;
 
-  TEST_ASSERT_EQUAL(BMP_NO_ERR, parseBMPHeader(bmp_data.data(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_NO_ERR, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
   TEST_ASSERT_EQUAL(true, image_reverse);
 }
 
@@ -70,7 +70,7 @@ void test_parseBMPHeader_NOT_BMP(void)
 
   bmp_data[0] = 'A';
 
-  TEST_ASSERT_EQUAL(BMP_NOT_BMP, parseBMPHeader(bmp_data.data(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_NOT_BMP, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
 }
 
 void test_parseBMPHeader_BMP_BAD_SIZE(void)
@@ -80,7 +80,7 @@ void test_parseBMPHeader_BMP_BAD_SIZE(void)
 
   bmp_data[18] = 123;
 
-  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
 }
 
 void test_parseBMPHeader_BMP_COLOR_SCHEME_FAILED(void)
@@ -90,7 +90,7 @@ void test_parseBMPHeader_BMP_COLOR_SCHEME_FAILED(void)
 
   bmp_data[54] = 123;
 
-  TEST_ASSERT_EQUAL(BMP_COLOR_SCHEME_FAILED, parseBMPHeader(bmp_data.data(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_COLOR_SCHEME_FAILED, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
 }
 
 void test_parseBMPHeader_BMP_INVALID_OFFSET(void)
@@ -100,7 +100,30 @@ void test_parseBMPHeader_BMP_INVALID_OFFSET(void)
 
   bmp_data[10] = 5;
 
-  TEST_ASSERT_EQUAL(BMP_INVALID_OFFSET, parseBMPHeader(bmp_data.data(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_INVALID_OFFSET, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
+}
+
+void test_parseBMPHeader_truncated_pixels(void)
+{
+  auto bmp_data = readBMPFile("./test.bmp");
+  bool image_reverse = false;
+
+  // valid header, pixel data cut short (e.g. a 62-byte body from a server)
+  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), BMP_1BPP_HEADER_SIZE, image_reverse));
+  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), bmp_data.size() - 1, image_reverse));
+  TEST_ASSERT_EQUAL(BMP_NO_ERR, parseBMPHeader(bmp_data.data(), bmp_data.size(), image_reverse));
+}
+
+void test_parseBMPHeader_truncated_header(void)
+{
+  auto bmp_data = readBMPFile("./test.bmp");
+  bool image_reverse = false;
+
+  TEST_ASSERT_EQUAL(BMP_NOT_BMP, parseBMPHeader(bmp_data.data(), 0, image_reverse));
+  TEST_ASSERT_EQUAL(BMP_NOT_BMP, parseBMPHeader(bmp_data.data(), 1, image_reverse));
+  TEST_ASSERT_EQUAL(BMP_NOT_BMP, parseBMPHeader(nullptr, bmp_data.size(), image_reverse));
+  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), 2, image_reverse));
+  TEST_ASSERT_EQUAL(BMP_BAD_SIZE, parseBMPHeader(bmp_data.data(), BMP_1BPP_HEADER_SIZE - 1, image_reverse));
 }
 
 void setUp(void) {
@@ -120,6 +143,8 @@ void process()
   RUN_TEST(test_parseBMPHeader_BMP_BAD_SIZE);
   RUN_TEST(test_parseBMPHeader_BMP_COLOR_SCHEME_FAILED);
   RUN_TEST(test_parseBMPHeader_BMP_INVALID_OFFSET);
+  RUN_TEST(test_parseBMPHeader_truncated_pixels);
+  RUN_TEST(test_parseBMPHeader_truncated_header);
   UNITY_END();
 }
 

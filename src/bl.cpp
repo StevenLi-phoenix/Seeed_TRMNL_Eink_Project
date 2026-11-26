@@ -41,6 +41,7 @@
 #include <battery_estimate.h>
 #include <boot_guard.h>
 #include <battery_guard.h>
+#include <url_policy.h>
 #include <esp_system.h>
 
 bool pref_clear = false;
@@ -50,6 +51,18 @@ uint8_t *buffer = nullptr;
 char filename[1024];      // image URL
 char binUrl[1024];        // update URL
 char message_buffer[128]; // message to show on the screen
+
+// Server strings go into the fixed buffers above. String::toCharArray(buf,
+// len + 1) copies len bytes whatever the buffer size, so an image_url or
+// message longer than the buffer used to overwrite the neighbouring globals.
+static void copyBounded(const String &src, char *dst, size_t dst_size, const char *what)
+{
+  if (src.length() >= dst_size)
+  {
+    Log_error("%s too long (%u bytes, buffer %u), truncated", what, (unsigned)src.length(), (unsigned)dst_size);
+  }
+  src.toCharArray(dst, dst_size);
+}
 uint32_t time_since_sleep;
 image_err_e png_res = PNG_DECODE_ERR;
 bmp_err_e bmp_res = BMP_NOT_BMP;
@@ -875,7 +888,7 @@ static https_request_err_e downloadAndShow()
           }
           else
           {
-            bmp_res = parseBMPHeader(buffer, image_reverse);
+            bmp_res = parseBMPHeader(buffer, content_size, image_reverse);
             Log.info("%s [%d]: BMP Parsing result: %d\r\n", __FILE__, __LINE__, bmp_res);
           }
           Serial.println();
@@ -1091,13 +1104,22 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
           Log.error("%s [%d]: Empty URL\r\n", __FILE__, __LINE__);
           update_firmware = false;
         }
+        else if (firmware_url.length() >= sizeof(binUrl) ||
+                 !url_is_trusted_firmware_source(firmware_url.c_str(), API_BASE_URL))
+        {
+          // unsigned app image: only take it over verified TLS from our own
+          // compile-time server, not from whatever NVS api_url points at
+          Log_error_submit("OTA refused: firmware_url must be https on the API_BASE_URL host (%s): %s",
+                           API_BASE_URL, firmware_url.c_str());
+          update_firmware = false;
+        }
       }
       if (image_url.length() > 0)
       {
         Log.info("%s [%d]: image_url: %s\r\n", __FILE__, __LINE__, image_url.c_str());
         Log.info("%s [%d]: image url end with: %d\r\n", __FILE__, __LINE__, image_url.endsWith("/setup-logo.bmp"));
 
-        image_url.toCharArray(filename, image_url.length() + 1);
+        copyBounded(image_url, filename, sizeof(filename), "image_url");
         // check if plugin is applied
         bool flag = preferences.getBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
         Log.info("%s [%d]: flag: %d\r\n", __FILE__, __LINE__, flag);
@@ -1163,7 +1185,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
       if (firmware_url.length() > 0)
       {
         Log.info("%s [%d]: firmware_url: %s\r\n", __FILE__, __LINE__, firmware_url.c_str());
-        firmware_url.toCharArray(binUrl, firmware_url.length() + 1);
+        copyBounded(firmware_url, binUrl, sizeof(binUrl), "firmware_url");
       }
       Log.info("%s [%d]: refresh_rate: %d\r\n", __FILE__, __LINE__, rate);
       if (rate != preferences.getUInt(PREFERENCES_SLEEP_TIME_KEY, SLEEP_TIME_TO_SLEEP))
@@ -1232,7 +1254,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             Log.info("%s [%d]: image_url: %s\r\n", __FILE__, __LINE__, image_url.c_str());
             Log.info("%s [%d]: image url end with: %d\r\n", __FILE__, __LINE__, image_url.endsWith("/setup-logo.bmp"));
 
-            image_url.toCharArray(filename, image_url.length() + 1);
+            copyBounded(image_url, filename, sizeof(filename), "image_url");
             // check if plugin is applied
             bool flag = preferences.getBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
             Log.info("%s [%d]: flag: %d\r\n", __FILE__, __LINE__, flag);
@@ -1334,7 +1356,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             Log.info("%s [%d]: image_url: %s\r\n", __FILE__, __LINE__, image_url.c_str());
             Log.info("%s [%d]: image url end with: %d\r\n", __FILE__, __LINE__, image_url.endsWith("/setup-logo.bmp"));
 
-            image_url.toCharArray(filename, image_url.length() + 1);
+            copyBounded(image_url, filename, sizeof(filename), "image_url");
             // check if plugin is applied
             bool flag = preferences.getBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
             Log.info("%s [%d]: flag: %d\r\n", __FILE__, __LINE__, flag);
@@ -1408,7 +1430,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             Log.info("Rewind BMP\n\r");
             buffer = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
             file_check_bmp = filesystem_read_from_file(last_dot_file.c_str(), buffer, DISPLAY_BMP_IMAGE_SIZE);
-            bmp_proccess_response = parseBMPHeader(buffer, image_reverse);
+            bmp_proccess_response = parseBMPHeader(buffer, file_check_bmp ? DISPLAY_BMP_IMAGE_SIZE : 0, image_reverse);
           }
           else if (last_dot_file == "/last.png")
           {
@@ -1496,7 +1518,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
               return HTTPS_WRONG_IMAGE_FORMAT;
             }
 
-            bmp_err_e bmp_parse_result = parseBMPHeader(buffer, image_reverse);
+            bmp_err_e bmp_parse_result = parseBMPHeader(buffer, DISPLAY_BMP_IMAGE_SIZE, image_reverse);
             if (bmp_parse_result != BMP_NO_ERR)
             {
               free(buffer);
@@ -1546,7 +1568,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             Log.info("%s [%d]: image_url: %s\r\n", __FILE__, __LINE__, image_url.c_str());
             Log.info("%s [%d]: image url end with: %d\r\n", __FILE__, __LINE__, image_url.endsWith("/setup-logo.bmp"));
 
-            image_url.toCharArray(filename, image_url.length() + 1);
+            copyBounded(image_url, filename, sizeof(filename), "image_url");
             // check if plugin is applied
             bool flag = preferences.getBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
             Log.info("%s [%d]: flag: %d\r\n", __FILE__, __LINE__, flag);
@@ -1701,11 +1723,11 @@ static bool performApiSetup()
 
     String image_url = apiResponse.image_url;
     Log.info("%s [%d]: image_url - %s\r\n", __FILE__, __LINE__, image_url.c_str());
-    image_url.toCharArray(filename, image_url.length() + 1);
+    copyBounded(image_url, filename, sizeof(filename), "image_url");
 
     String message_str = apiResponse.message;
     Log.info("%s [%d]: message - %s\r\n", __FILE__, __LINE__, message_str.c_str());
-    message_str.toCharArray(message_buffer, message_str.length() + 1);
+    copyBounded(message_str, message_buffer, sizeof(message_buffer), "message");
 
     Log.info("%s [%d]: status - %d\r\n", __FILE__, __LINE__, status);
     return true;
@@ -1880,6 +1902,13 @@ static void resetDeviceCredentials(void)
 static void checkAndPerformFirmwareUpdate(void)
 {
 
+  if (!url_is_trusted_firmware_source(binUrl, API_BASE_URL))
+  {
+    Log_error("OTA refused: untrusted firmware URL %s", binUrl);
+    update_firmware = false; // fall through to a normal sleep instead of the OTA-failed restart
+    return;
+  }
+
   withHttp(binUrl, [&](HTTPClient *https, HttpError errorCode) -> bool
            {
              if (errorCode != HttpError::HTTPCLIENT_SUCCESS || !https)
@@ -1893,6 +1922,7 @@ static void checkAndPerformFirmwareUpdate(void)
                {
                  showMessageWithLogo(WIFI_WEAK);
                }
+               return false; // https is null here
              }
 
              int httpCode = https->GET();

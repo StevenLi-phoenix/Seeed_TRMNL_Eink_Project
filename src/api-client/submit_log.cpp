@@ -10,9 +10,9 @@ bool submitLogToApi(LogApiInput &input, const char *api_url)
   String payload = serializeApiLogRequest(input.log_buffer);
   Log_info("[HTTPS] begin /api/log ...");
 
-  char new_url[200];
-  strcpy(new_url, api_url);
-  strcat(new_url, "/api/log");
+  // api_url comes from NVS (captive portal "Custom Server" field) and has no
+  // length limit; the old char[200] + strcpy/strcat overflowed the stack
+  String new_url = String(api_url) + "/api/log";
 
   return withHttp(new_url, [&](HTTPClient *httpsPointer, HttpError errorCode) -> bool
                   {

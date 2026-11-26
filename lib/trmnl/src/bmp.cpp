@@ -7,14 +7,19 @@
  * @param reserved variable address to store parsed color schematic
  * @return bmp_err_e error code
  */
-bmp_err_e parseBMPHeader(uint8_t *data, bool &reversed)
+bmp_err_e parseBMPHeader(uint8_t *data, size_t size, bool &reversed)
 {
 
   // Check if the file is a BMP image
-  if (data[0] != 'B' || data[1] != 'M')
+  if (data == nullptr || size < 2 || data[0] != 'B' || data[1] != 'M')
   {
     Log_fatal("It is not a BMP file");
     return BMP_NOT_BMP;
+  }
+  if (size < BMP_1BPP_HEADER_SIZE)
+  {
+    Log_error("BMP truncated: %u bytes, header needs %d", (unsigned)size, BMP_1BPP_HEADER_SIZE);
+    return BMP_BAD_SIZE;
   }
   // Get width and height from the header
   uint32_t width = *(uint32_t *)&data[18];
@@ -26,6 +31,11 @@ bmp_err_e parseBMPHeader(uint8_t *data, bool &reversed)
 
   if (width != 800 || height != 480 || bitsPerPixel != 1 || imageDataSize != 48000 || colorTableEntries != 2)
     return BMP_BAD_SIZE;
+  if (size < BMP_1BPP_HEADER_SIZE + imageDataSize)
+  {
+    Log_error("BMP truncated: %u bytes, header + pixels need %u", (unsigned)size, (unsigned)(BMP_1BPP_HEADER_SIZE + imageDataSize));
+    return BMP_BAD_SIZE;
+  }
   // Get the offset of the pixel data
   uint32_t dataOffset = *(uint32_t *)&data[10];
 

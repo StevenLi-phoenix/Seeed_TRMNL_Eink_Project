@@ -3,6 +3,10 @@
 
 #define FW_MAJOR_VERSION 1
 #define FW_MINOR_VERSION 7
+// 1.7.1 (fork): security - TLS server certificates verified against the
+// embedded Mozilla CA bundle (was setInsecure), OTA only from https on the
+// API_BASE_URL host, recovery portal can't reset/repoint the device, bounded
+// server-string and BMP buffers, patched ArduinoJson/ESPAsyncWebServer/PNGdec.
 // 1.7.0 (fork): battery protection + fast cadence — boot-loop guard
 // (RTC_NOINIT counter, exponential backoff without WiFi), deep-discharge
 // guard (no WiFi below BATTERY_CRITICAL_V, one-time "battery empty" screen),
@@ -10,7 +14,7 @@
 // The server sends 60 s refresh rates to >= 1.7.0 on external power.
 // (1.6.9: WiFi recovery portal + timestamps; 1.6.8: display.lishuyu.app +
 // real partial refresh.)
-#define FW_PATCH_VERSION 0
+#define FW_PATCH_VERSION 1
 
 // Helper macros for stringification
 #define STRINGIFY(x) #x

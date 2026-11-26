@@ -49,19 +49,41 @@ bool WifiCaptive::startPortal(uint32_t timeoutMs)
     // configure DSN and WEB server
     setUpDNSServer(*_dnsServer, localIP);
 
+    // The recovery portal (timeoutMs > 0) opens unattended on an open AP every
+    // wake while WiFi is down. Anyone in range could otherwise factory-reset
+    // the device (/soft-reset) or repoint it at their own server (the
+    // "server" field). Recovery only needs WiFi credentials; reset stays on
+    // the button long-press and the server on the first-setup portal.
+    const bool unattended = timeoutMs > 0;
+
     WifiOperationCallbacks callbacks = {
-        .resetSettings = [this]()
+        .resetSettings = [this, unattended]() -> bool
         {
+            if (unattended)
+            {
+                Log_info("Recovery portal: /soft-reset refused");
+                return false;
+            }
             resetSettings();
             if (_resetcallback != NULL)
             {
                 _resetcallback(); // @CALLBACK
-            } },
-        .setConnectionCredentials = [this](const WifiCredentials credentials, const String api_server)
+            }
+            return true; },
+        .setConnectionCredentials = [this, unattended](const WifiCredentials credentials, const String api_server)
         {
             _ssid = credentials.ssid;
             _password = credentials.pswd;
-            _api_server = api_server; },
+            if (unattended && api_server.length() > 0)
+            {
+                Log_info("Recovery portal: ignoring custom server field");
+                _api_server = "";
+            }
+            else
+            {
+                _api_server = api_server;
+            }
+        },
         .getAnnotatedNetworks = [this](bool runScan)
         {
             // Warning: DO NOT USE true on this function in an async context!

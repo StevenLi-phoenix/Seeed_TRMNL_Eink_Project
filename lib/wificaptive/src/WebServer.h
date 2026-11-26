@@ -11,7 +11,7 @@
 /** These are the things that the captive portal web app needs to interact with */
 struct WifiOperationCallbacks
 {
-    std::function<void()> resetSettings;
+    std::function<bool()> resetSettings; // false = refused (unattended recovery portal)
     std::function<void(const WifiCredentials, const String)> setConnectionCredentials;
     std::function<std::vector<Network>(bool)> getAnnotatedNetworks;
 };
