@@ -39,6 +39,9 @@
 #include "loading.h"
 #include <wifi-helpers.h>
 #include <battery_estimate.h>
+#include <boot_guard.h>
+#include <battery_guard.h>
+#include <esp_system.h>
 
 bool pref_clear = false;
 String new_filename = "";
@@ -61,6 +64,13 @@ esp_sleep_wakeup_cause_t wakeup_reason = ESP_SLEEP_WAKEUP_UNDEFINED; // wake-up 
 MSG current_msg = NONE;
 SPECIAL_FUNCTION special_function = SF_NONE;
 RTC_DATA_ATTR uint8_t need_to_refresh_display = 1;
+// Boot-loop guard state. RTC_NOINIT (not RTC_DATA) so it survives panic /
+// WDT / brownout / software resets as well as deep sleep; magic + check word
+// detect the random content after power-on or the first boot after flashing.
+RTC_NOINIT_ATTR BootGuardState boot_guard_state;
+static BootGuardDecision boot_guard_decision = {};
+static esp_reset_reason_t boot_reset_reason = ESP_RST_UNKNOWN;
+static bool ota_succeeded = false; // set by checkAndPerformFirmwareUpdate()
 
 Preferences preferences;
 PreferencesPersistence preferencesPersistence(preferences);
@@ -75,6 +85,12 @@ static void downloadSetupImage();                    // download and display set
 static void resetDeviceCredentials(void);            // reset device credentials API key, Friendly ID, Wi-Fi SSID and password
 static void checkAndPerformFirmwareUpdate(void);     // OTA update
 static void goToSleep(void);                         // sleep preparing
+static void deepSleepNow(uint32_t seconds, bool backoff); // arm wake sources + deep sleep (all paths)
+static void guardDeepSleep(uint32_t seconds, bool backoff); // minimal sleep before WiFi/SPIFFS are up
+static void restartIntentionally(const char *why);   // ESP.restart() the boot-loop guard won't count
+static void bootGuardOnBoot(void);                   // count this boot, decide normal/backoff
+static void bootGuardReport(void);                   // server-visible line after abnormal resets
+static void batteryGuardCheck(void);                 // deep-discharge guard (no WiFi while critical)
 static bool setClock(void);                          // clock synchronization
 static float readBatteryVoltage(void);               // battery voltage reading
 static void submitOrSaveLogString(const char *log_buffer, size_t size); // log sending
@@ -115,6 +131,9 @@ void bl_init(void)
   Serial.begin(115200);
   Log.begin(LOG_LEVEL_VERBOSE, &Serial);
   Log_info("BL init success");
+  // Count this boot FIRST, before anything that could crash (display, SPIFFS,
+  // WiFi, HTTP). Every intentional deep sleep resets the counter.
+  bootGuardOnBoot();
   pins_init();
   vBatt = readBatteryVoltage(); // Read the battery voltage BEFORE WiFi is turned on
 
@@ -178,6 +197,18 @@ void bl_init(void)
     ESP.restart();
   }
   Log_info("preferences end");
+
+  // Battery protection, before the display, SPIFFS and WiFi come up:
+  // 1) boot-loop guard: N boots in a row never reached deep sleep → back off
+  //    without WiFi (the Sep 2026 incident: ~14k wakes/day drained the LiPo);
+  // 2) deep-discharge guard: battery below BATTERY_CRITICAL_V → no WiFi.
+  bootGuardReport();
+  if (boot_guard_decision.action == BOOT_GUARD_BACKOFF)
+  {
+    Log_info("Boot-loop guard: skipping WiFi, backoff deep sleep %lu s", (unsigned long)boot_guard_decision.sleep_seconds);
+    guardDeepSleep(boot_guard_decision.sleep_seconds, true); // does not return
+  }
+  batteryGuardCheck(); // does not return while the battery is critical
 
   if (double_click)
   { // special function reading
@@ -554,8 +585,15 @@ void bl_init(void)
   display_sleep();
   if (!update_firmware)
     goToSleep();
+  else if (ota_succeeded)
+    restartIntentionally("OTA update applied"); // boot into the new image
   else
+  {
+    // keep upstream behavior (restart and retry), but this restart is counted
+    // by the boot-loop guard so a failing OTA can't loop at full speed
+    Log_error("OTA update failed; restarting (counted by boot-loop guard)");
     ESP.restart();
+  }
 }
 
 /**
@@ -1831,7 +1869,7 @@ static void resetDeviceCredentials(void)
   else
     Log.error("%s [%d]: The device reseting error. The device will be reset now...\r\n", __FILE__, __LINE__);
   preferences.end();
-  ESP.restart();
+  restartIntentionally("credentials reset");
 }
 
 /**
@@ -1874,6 +1912,7 @@ static void checkAndPerformFirmwareUpdate(void)
                    if (Update.end(true))
                    {
                      Log.info("%s [%d]: Firmware update successful. Rebooting...\r\n", __FILE__, __LINE__);
+                     ota_succeeded = true;
                      showMessageWithLogo(FW_UPDATE_SUCCESS);
                    }
                    else
@@ -1916,7 +1955,39 @@ static void goToSleep(void)
   Log.info("%s [%d]: time to sleep - %d\r\n", __FILE__, __LINE__, time_to_sleep);
   preferences.putUInt(PREFERENCES_LAST_SLEEP_TIME, getTime());
   preferences.end();
-  esp_sleep_enable_timer_wakeup((uint64_t)time_to_sleep * SLEEP_uS_TO_S_FACTOR);
+  deepSleepNow(time_to_sleep, false);
+}
+
+/**
+ * @brief Minimal deep sleep for the boot-loop and battery guards: runs before
+ *        WiFi and SPIFFS are started, so only NVS needs closing.
+ * @param seconds sleep duration
+ * @param backoff true for a boot-loop backoff sleep (keeps the guard counter)
+ */
+static void guardDeepSleep(uint32_t seconds, bool backoff)
+{
+  preferences.end();
+  deepSleepNow(seconds, backoff);
+}
+
+/**
+ * @brief Arm the timer + button wake sources and enter deep sleep. EVERY deep
+ *        sleep goes through here so the boot-loop guard sees it: an
+ *        intentional sleep clears the guard, a backoff sleep advances it.
+ *        Called after preferences.end(): log at INFO only (serial; ERROR logs
+ *        would try to store into the closed NVS).
+ */
+static void deepSleepNow(uint32_t seconds, bool backoff)
+{
+  if (backoff)
+    boot_guard_on_backoff_sleep(&boot_guard_state);
+  else
+    boot_guard_on_intentional_sleep(&boot_guard_state);
+  Log_info("Deep sleep %lu s (%s); boot guard boots=%lu step=%lu flags=0x%lx",
+           (unsigned long)seconds, backoff ? "boot-loop backoff" : "intentional",
+           (unsigned long)boot_guard_state.boots, (unsigned long)boot_guard_state.backoff_step,
+           (unsigned long)boot_guard_state.flags);
+  esp_sleep_enable_timer_wakeup((uint64_t)seconds * SLEEP_uS_TO_S_FACTOR);
   // Configure GPIO pin for wakeup
 #if CONFIG_IDF_TARGET_ESP32
   #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
@@ -1929,6 +2000,177 @@ static void goToSleep(void)
 #error "Unsupported ESP32 target for GPIO wakeup configuration"
 #endif
   esp_deep_sleep_start();
+}
+
+/**
+ * @brief ESP.restart() for deliberate reboots (credential reset, applied OTA):
+ *        the boot-loop guard forgives the next boot (capped at
+ *        BOOT_GUARD_MAX_FORGIVEN_RESTARTS in a row, so a restart loop is
+ *        still caught).
+ */
+static void restartIntentionally(const char *why)
+{
+  boot_guard_on_intentional_restart(&boot_guard_state);
+  Log_info("Intentional restart (%s); boot guard won't count the next boot", why);
+  ESP.restart();
+}
+
+static const char *resetReasonName(esp_reset_reason_t reason)
+{
+  switch (reason)
+  {
+  case ESP_RST_POWERON:
+    return "POWERON";
+  case ESP_RST_EXT:
+    return "EXT";
+  case ESP_RST_SW:
+    return "SW";
+  case ESP_RST_PANIC:
+    return "PANIC";
+  case ESP_RST_INT_WDT:
+    return "INT_WDT";
+  case ESP_RST_TASK_WDT:
+    return "TASK_WDT";
+  case ESP_RST_WDT:
+    return "WDT";
+  case ESP_RST_DEEPSLEEP:
+    return "DEEPSLEEP";
+  case ESP_RST_BROWNOUT:
+    return "BROWNOUT";
+  case ESP_RST_SDIO:
+    return "SDIO";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+static BootGuardResetKind classifyResetReason(esp_reset_reason_t reason)
+{
+  switch (reason)
+  {
+  case ESP_RST_POWERON:
+  case ESP_RST_EXT: // reset pin: a deliberate fresh start, like power-on
+    return BOOT_RESET_POWER_ON;
+  case ESP_RST_DEEPSLEEP:
+    return BOOT_RESET_DEEP_SLEEP;
+  case ESP_RST_SW:
+    return BOOT_RESET_SOFTWARE;
+  default: // panic, watchdogs, brownout, unknown (incl. USB-JTAG reset on IDF 4.4)
+    return BOOT_RESET_ABNORMAL;
+  }
+}
+
+/**
+ * @brief Count this boot in the RTC_NOINIT boot-loop guard and decide whether
+ *        it may run normally. Runs before NVS is open: serial logging only.
+ */
+static void bootGuardOnBoot(void)
+{
+  boot_reset_reason = esp_reset_reason();
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool button_wake = cause == ESP_SLEEP_WAKEUP_GPIO || cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1;
+  boot_guard_decision = boot_guard_on_boot(&boot_guard_state, classifyResetReason(boot_reset_reason),
+                                           (uint32_t)boot_reset_reason, button_wake);
+  Log_info("Boot guard: reset=%s(%d) wake=%d button=%d reinit=%d forgiven=%d boots=%lu step=%lu last_abnormal=%s -> %s (sleep %lu s)",
+           resetReasonName(boot_reset_reason), (int)boot_reset_reason, (int)cause, button_wake ? 1 : 0,
+           boot_guard_decision.reinitialized ? 1 : 0, boot_guard_decision.forgiven_restart ? 1 : 0,
+           (unsigned long)boot_guard_decision.boots, (unsigned long)boot_guard_state.backoff_step,
+           resetReasonName((esp_reset_reason_t)boot_guard_state.last_abnormal_reason),
+           boot_guard_action_name(boot_guard_decision.action), (unsigned long)boot_guard_decision.sleep_seconds);
+}
+
+/**
+ * @brief After abnormal resets, leave one server-visible line per wake. Uses
+ *        Log_error: app_logger only stores/submits logs >= ERROR (Log_info_*
+ *        never reaches the server). The line is stored in NVS now and flushed
+ *        by submitStoredLogs() as soon as a wake gets online (this one, or the
+ *        next allowed attempt), so it also survives a crash before WiFi.
+ *        Needs preferences open.
+ */
+static void bootGuardReport(void)
+{
+  if (!boot_guard_decision.abnormal)
+    return;
+  Log_error("Boot-loop guard: %lu boots in a row without deep sleep; reset=%s, last abnormal reset=%s, backoff step %lu -> %s (sleep %lu s)",
+            (unsigned long)boot_guard_decision.boots, resetReasonName(boot_reset_reason),
+            resetReasonName((esp_reset_reason_t)boot_guard_state.last_abnormal_reason),
+            (unsigned long)boot_guard_state.backoff_step, boot_guard_action_name(boot_guard_decision.action),
+            (unsigned long)boot_guard_decision.sleep_seconds);
+}
+
+/**
+ * @brief Deep-discharge guard. vBatt was read before WiFi. While the battery
+ *        is critical: no WiFi, a one-time "battery empty" screen (NVS flag, so
+ *        it is not redrawn every wake), deep sleep BATTERY_CRITICAL_RECHECK_S
+ *        and re-check; resume at BATTERY_CRITICAL_V + hysteresis. Readings
+ *        below BATTERY_INVALID_BELOW_V are garbage / no battery and never
+ *        hold the device. Returns only when the device may run normally.
+ */
+static void batteryGuardCheck(void)
+{
+#ifdef FAKE_BATTERY_VOLTAGE
+  Log_info("Battery guard: skipped (FAKE_BATTERY_VOLTAGE build)");
+#else
+  const int critical_mv = battery_volts_to_mv(BATTERY_CRITICAL_V);
+  const int hysteresis_mv = battery_volts_to_mv(BATTERY_CRITICAL_HYSTERESIS_V);
+  const int invalid_mv = battery_volts_to_mv(BATTERY_INVALID_BELOW_V);
+  bool in_critical = preferences.getBool(PREFERENCES_BATTERY_CRITICAL, false);
+  int vbatt_mv = battery_volts_to_mv(vBatt);
+  BatteryGuardAction action = battery_guard_decide(vbatt_mv, in_critical, critical_mv, hysteresis_mv, invalid_mv);
+  Log_info("Battery guard: vbatt=%d mV in_critical=%d (enter<%d, resume>=%d, invalid<%d mV) -> %s",
+           vbatt_mv, in_critical ? 1 : 0, critical_mv, critical_mv + hysteresis_mv, invalid_mv,
+           battery_guard_action_name(action));
+
+  if (action == BATTERY_GUARD_ENTER)
+  {
+    // one ADC glitch must not pause the device: confirm with a second reading
+    float confirm_v = readBatteryVoltage();
+    int confirm_mv = battery_volts_to_mv(confirm_v);
+    BatteryGuardAction confirm = battery_guard_decide(confirm_mv, false, critical_mv, hysteresis_mv, invalid_mv);
+    Log_info("Battery guard: confirm reading %d mV -> %s", confirm_mv, battery_guard_action_name(confirm));
+    if (confirm != BATTERY_GUARD_ENTER)
+    {
+      Log_info("Battery guard: low reading not confirmed; running normally");
+      vBatt = confirm_v; // report the plausible reading in telemetry
+      return;
+    }
+  }
+
+  switch (action)
+  {
+  case BATTERY_GUARD_NORMAL:
+    return;
+  case BATTERY_GUARD_INVALID:
+    if (in_critical)
+    {
+      // the MCU runs, so it is externally powered (battery likely detached)
+      preferences.remove(PREFERENCES_BATTERY_CRITICAL);
+      Log_error("Battery guard released: invalid reading %d mV (no battery / external power); resuming", vbatt_mv);
+    }
+    return;
+  case BATTERY_GUARD_RELEASE:
+    preferences.remove(PREFERENCES_BATTERY_CRITICAL);
+    Log_error("Battery guard released at %d mV (>= %d mV); resuming WiFi", vbatt_mv, critical_mv + hysteresis_mv);
+    return;
+  case BATTERY_GUARD_ENTER:
+    // flag BEFORE drawing: if drawing crashes, the next boot holds without
+    // redrawing instead of looping on the screen
+    preferences.putBool(PREFERENCES_BATTERY_CRITICAL, true);
+    // force the first fetch after recovery to redraw (same as a non-timer wake)
+    preferences.putString(PREFERENCES_FILENAME_KEY, "");
+    Log_error("Battery critical: %d mV < %d mV; WiFi paused, re-check every %d s until >= %d mV",
+              vbatt_mv, critical_mv, BATTERY_CRITICAL_RECHECK_S, critical_mv + hysteresis_mv);
+    display_init();
+    showMessageWithLogo(BATTERY_CRITICAL);
+    display_sleep();
+    break;
+  case BATTERY_GUARD_HOLD:
+    Log_info("Battery guard: still critical, screen already drawn");
+    break;
+  }
+  Log_info("Battery guard: deep sleep %d s without WiFi", BATTERY_CRITICAL_RECHECK_S);
+  guardDeepSleep(BATTERY_CRITICAL_RECHECK_S, false); // intentional sleep: clears the boot-loop guard
+#endif
 }
 
 // Not sure if WiFiClientSecure checks the validity date of the certificate.

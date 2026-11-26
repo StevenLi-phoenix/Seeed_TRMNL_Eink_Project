@@ -13,8 +13,12 @@
 #define ONE_BIT_PANEL EP75_800x480
 #define TWO_BIT_PANEL EP75_800x480_4GRAY_OLD
 BBEPAPER bbep(ONE_BIT_PANEL);
-// Counts the number of partial updates to know when to do a full update
-RTC_DATA_ATTR int iUpdateCount = 0;
+// Refreshes since the last FULL refresh, the FULL included (0 = none since
+// power-on/reset) and the epoch of that FULL (0 = unknown). Both feed the
+// anti-ghosting policy in lib/trmnl/refresh_policy; RTC_DATA_ATTR re-inits
+// them to 0 on power-on/panic, so the next update is FULL.
+RTC_DATA_ATTR uint32_t iUpdateCount = 0;
+RTC_DATA_ATTR uint32_t iLastFullEpoch = 0;
 #else
 #include "FastEPD.h"
 FASTEPD bbep;
@@ -28,6 +32,7 @@ FASTEPD bbep;
 #include <api-client/display.h>
 #include <trmnl_log.h>
 #include "png_flip.h"
+#include <refresh_policy.h>
 #include "../lib/bb_epaper/Fonts/Roboto_20.h"
 #include "../lib/bb_epaper/Fonts/nicoclean_8.h"
 extern char filename[];
@@ -733,15 +738,25 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_
         }
         iRefreshMode = REFRESH_PARTIAL;
         // NB: do NOT reset iUpdateCount here — it is RTC_DATA_ATTR and must
-        // accumulate across deep-sleep wakes so the "force a full refresh
-        // every 8 updates" anti-ghosting check below can actually fire.
+        // accumulate across deep-sleep wakes so the anti-ghosting FULL
+        // policy below (refresh_policy) can actually fire.
         // (Resetting it to 1 on every BMP made that check unreachable.)
     }
     Log_info("Display refresh start");
 #ifdef BB_EPAPER
-    if ((iUpdateCount & 7) == 0 || apiDisplayResult.response.maximum_compatibility == true) {
-        Log_info("%s [%d]: Forcing full refresh; desired refresh mode was: %d\r\n", __FILE__, __LINE__, iRefreshMode);
-        iRefreshMode = REFRESH_FULL; // force full refresh every 8 partials
+    // Anti-ghosting: FULL by age (~30 min, >= 8 updates) or a 60-update hard
+    // cap instead of every 8th update, so a 60 s cadence doesn't flash the
+    // panel every 8 minutes; old every-8 rule while the clock is unsynced.
+    uint32_t now_epoch = (uint32_t)time(nullptr);
+    FullRefreshReason full_reason = refresh_policy_full_reason(apiDisplayResult.response.maximum_compatibility,
+                                                               iUpdateCount, now_epoch, iLastFullEpoch);
+    Log_info("Refresh policy: max_compat=%d since_full=%lu now=%lu last_full=%lu age=%ld s -> full=%s",
+             apiDisplayResult.response.maximum_compatibility ? 1 : 0, (unsigned long)iUpdateCount,
+             (unsigned long)now_epoch, (unsigned long)iLastFullEpoch,
+             iLastFullEpoch ? (long)now_epoch - (long)iLastFullEpoch : -1L, refresh_policy_reason_name(full_reason));
+    if (full_reason != FULL_REASON_NONE) {
+        Log_info("%s [%d]: Forcing full refresh (%s); desired refresh mode was: %d\r\n", __FILE__, __LINE__, refresh_policy_reason_name(full_reason), iRefreshMode);
+        iRefreshMode = REFRESH_FULL;
     }
     int refresh_seconds = preferences.getUInt(PREFERENCES_SLEEP_TIME_KEY, SLEEP_TIME_TO_SLEEP);
     if (refresh_seconds >= 30*60 && iRefreshMode == REFRESH_PARTIAL) {
@@ -762,7 +777,8 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait, uint8_
     if (bAlloc) {
         bbep.freeBuffer();
     }
-    iUpdateCount++;
+    // bookkeeping uses the mode actually sent (after the FAST/!bWait overrides)
+    refresh_policy_note_refresh(iRefreshMode == REFRESH_FULL, now_epoch, &iUpdateCount, &iLastFullEpoch);
 #else
     bbep.fullUpdate();
 #endif
@@ -970,6 +986,19 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
         bbep.getStringBox(string3.c_str(), &rect);
         bbep.setCursor((bbep.width() - rect.w) / 2, -1);
         bbep.print(string3);
+    }
+    break;
+    case BATTERY_CRITICAL:
+    {
+        const char string1[] = "Battery empty - plug in USB-C to resume";
+        bbep.getStringBox(string1, &rect);
+        bbep.setCursor((bbep.width() - rect.w) / 2, 400);
+        bbep.println(string1);
+        String string2 = "Updates paused to protect the battery; they resume at " +
+                         String(BATTERY_CRITICAL_V + BATTERY_CRITICAL_HYSTERESIS_V, 2) + " V";
+        bbep.getStringBox(string2.c_str(), &rect);
+        bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+        bbep.print(string2);
     }
     break;
     case MSG_FORMAT_ERROR:

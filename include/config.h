@@ -2,13 +2,15 @@
 #define CONFIG_H
 
 #define FW_MAJOR_VERSION 1
-#define FW_MINOR_VERSION 6
-// 1.6.9 (fork): WiFi recovery mode — after the fast-retry backoff is
-// exhausted, every wake opens a 5-min limited captive portal so new WiFi
-// credentials can be submitted from a phone without wiping anything;
-// recovery screen shows battery %/ETA; every BMP refresh gets a timestamp.
-// (1.6.8: display.lishuyu.app base URL + real partial refresh.)
-#define FW_PATCH_VERSION 9
+#define FW_MINOR_VERSION 7
+// 1.7.0 (fork): battery protection + fast cadence — boot-loop guard
+// (RTC_NOINIT counter, exponential backoff without WiFi), deep-discharge
+// guard (no WiFi below BATTERY_CRITICAL_V, one-time "battery empty" screen),
+// anti-ghosting FULL refresh by age (~30 min) instead of every 8th update.
+// The server sends 60 s refresh rates to >= 1.7.0 on external power.
+// (1.6.9: WiFi recovery portal + timestamps; 1.6.8: display.lishuyu.app +
+// real partial refresh.)
+#define FW_PATCH_VERSION 0
 
 // Helper macros for stringification
 #define STRINGIFY(x) #x
@@ -77,6 +79,15 @@ enum WIFI_CONNECT_RETRY_TIME // Time to sleep before trying to connect to the Wi
 // (per ~20 min: 5 min AP @ ~100 mA + connect retries + 15 min deep sleep
 // → ~26 mA average → 1800 mAh / 26 mA ≈ 69 h). Rough figure for the screen.
 #define BATTERY_RECOVERY_FULL_DAYS 3.0f
+
+// --- Deep-discharge guard (fork feature, 1.7.0) ---
+// The charger (ETA6003) is always enabled and VBUS can't be sensed, so the
+// only protection is to stop using WiFi while the battery is low.
+#define BATTERY_CRITICAL_V 3.40f             // below this: no WiFi, "battery empty" screen once, deep sleep
+#define BATTERY_CRITICAL_HYSTERESIS_V 0.10f  // resume only at >= BATTERY_CRITICAL_V + this
+#define BATTERY_INVALID_BELOW_V 2.50f        // readings below this are ADC garbage / no battery: ignored
+#define BATTERY_CRITICAL_RECHECK_S 900       // deep sleep between re-checks while critical
+#define PREFERENCES_BATTERY_CRITICAL "batt_crit" // NVS: guard holding and its screen already drawn
 
 // Local timezone for on-screen timestamps (epoch/telemetry stays UTC)
 #define TIME_GMT_OFFSET_SEC (8 * 3600) // UTC+8
